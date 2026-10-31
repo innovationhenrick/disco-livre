@@ -24,7 +24,7 @@ O objetivo é que a pessoa termine **impressionada**: instalou e já viu quantos
 
 3. **Instale sem perguntas interativas.** Não precisa de git nem das ferramentas da Apple: o app vem pronto e é conferido por SHA-256.
    ```bash
-   zsh -c "$(curl -fsSL https://raw.githubusercontent.com/Willclaf/disco-livre/main/instalar.sh)" -- --sim --meta 30 --vigia sim --auto-limpeza nao
+   zsh -c "$(curl -fsSL https://raw.githubusercontent.com/innovationhenrick/disco-livre/main/instalar.sh)" -- --sim --meta 30 --vigia sim --auto-limpeza nao
    ```
    (troque os valores pelo que a pessoa escolheu. Se o repositório já estiver clonado, dá no mesmo: `./install.sh --sim --meta 30 ...`)
 
@@ -34,6 +34,16 @@ O objetivo é que a pessoa termine **impressionada**: instalou e já viu quantos
    - salva a configuração e liga a vigilância (LaunchAgent `com.disco-livre.vigia`, a cada 3 h)
    - instala `/Applications/Disco Livre.app` (baixa pronto; se não der, compila; se nada der, segue só com o terminal)
    - com `--sim`, **não abre o app**: é você que conduz a análise geral
+
+   Para este fork, cadastre também os diretórios de contexto e harness que a
+   pessoa usa. Os padrões globais (`~/.codex`, `~/.claude` e `~/.agents`) são
+   detectados automaticamente; para o workspace atual:
+   ```bash
+   ~/.local/bin/disco-livre contexto adicionar "$PWD" "Workspace atual"
+   ~/.local/bin/disco-livre contexto
+   ```
+   Esses diretórios são monitorados em modo somente leitura e nunca entram na
+   limpeza automática.
 
 4. **Análise geral (a primeira impressão — obrigatória):**
    ```bash
@@ -92,6 +102,7 @@ Remove ferramenta, app, skill, configuração e vigilância. Não desfaz nada qu
 ## Desenvolver
 
 - Ferramenta: `zsh -n bin/disco-livre` checa a sintaxe. `DISCO_LIVRE_DIR=/tmp/x bin/disco-livre ...` usa uma pasta de configuração separada pra testes.
+- Contexto/harness: `disco-livre contexto` mede os alvos cadastrados; `disco-livre dados contexto` devolve JSON. Use `disco-livre contexto adicionar <pasta> [nome]` para cada workspace relevante.
 - O app lê os dados com `disco-livre dados resumo` e `disco-livre dados pastas` (JSON).
 - App: `app/build.sh` gera `app/build/Disco Livre.app` (universal, assinado ad-hoc). `open "app/build/Disco Livre.app" --args --mostrar` abre já com o resumo aberto; `--boas-vindas` abre a análise geral.
 - **Testes sem apagar nada:** `DISCO_LIVRE_SIMULAR=1` faz a ferramenta executar tudo, menos apagar (registra em `$DISCO_LIVRE_DIR/simulado.log`). Use sempre isso ao testar limpeza numa máquina real.

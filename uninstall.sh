@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Remove o Disco Livre por completo, mesmo se você só arrastou o app pra Lixeira.
 # Funciona de qualquer lugar:
-#   zsh -c "$(curl -fsSL https://raw.githubusercontent.com/Willclaf/disco-livre/main/uninstall.sh)"
+#   zsh -c "$(curl -fsSL https://raw.githubusercontent.com/innovationhenrick/disco-livre/main/uninstall.sh)"
 launchctl bootout "gui/$(id -u)/com.disco-livre.vigia" 2>/dev/null
 rm -f "$HOME/Library/LaunchAgents/com.disco-livre.vigia.plist"
 pkill -x DiscoLivre 2>/dev/null

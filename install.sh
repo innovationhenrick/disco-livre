@@ -11,7 +11,7 @@ cd "${0:A:h}"
 B=$'\e[1m' D=$'\e[2m' G=$'\e[32m' Y=$'\e[33m' N=$'\e[0m'
 [[ -t 1 ]] || B= D= G= Y= N=
 BIN="$HOME/.local/bin"
-REPO="Willclaf/disco-livre"
+REPO="innovationhenrick/disco-livre"
 VERSAO=$(sed -n 's/^VERSAO="\(.*\)"/\1/p' bin/disco-livre)
 
 META= VIGIA= AUTO= SEM_APP= COMPILAR= NAO_ABRIR= PERGUNTAR=1

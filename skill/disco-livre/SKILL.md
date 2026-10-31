@@ -85,6 +85,27 @@ disco-livre ativar
 
 A vigilância roda a cada 3 h e manda notificação no Mac quando: fica abaixo da meta, o disco perde mais de 10 GB em 24 h, ou um app entra em loop de crash (os relatórios são apagados sozinhos).
 
+## 5b. Contexto e harness de agentes
+
+Quando a pessoa mencionar contexto, harness, sessões do Codex/Claude ou o
+workspace atual, consulte primeiro:
+
+```bash
+disco-livre contexto
+disco-livre dados contexto
+```
+
+Os alvos padrão são `~/.codex`, `~/.claude` e `~/.agents`. Para acompanhar um
+workspace específico, cadastre-o:
+
+```bash
+disco-livre contexto adicionar "$PWD" "Workspace atual"
+```
+
+Explique que essa medição é somente leitura. Nunca sugira apagar sessões,
+prompts, logs, projetos ou arquivos do harness automaticamente; qualquer
+limpeza desses dados exige uma decisão explícita e separada da pessoa.
+
 ## Casos reais (aprenda com eles)
 
 - **"Filmes" mostra 4 GB mas a pasta está vazia** → `~/Movies/.gallery` (oculta): stills da galeria do DaVinci Resolve em DPX. Solução: `disco-livre mover` pro HD externo com o Resolve fechado.

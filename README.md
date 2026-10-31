@@ -25,7 +25,7 @@ Em uma tarde voltaram **mais de 35 GB** sem apagar nada importante. Esta ferrame
 
 ### Jeito mais fácil: baixar o instalador (.dmg)
 
-1. Baixe **[DiscoLivre.dmg](https://github.com/Willclaf/disco-livre/releases/latest/download/DiscoLivre.dmg)**
+1. Baixe **[DiscoLivre.dmg](https://github.com/innovationhenrick/disco-livre/releases/latest/download/DiscoLivre.dmg)**
 2. Abra o arquivo e **arraste o Disco Livre pra pasta Aplicativos**
 3. Abra o Disco Livre. Na primeira vez, o Mac pode dizer que não verificou o desenvolvedor: vá em **Ajustes do Sistema → Privacidade e Segurança → Abrir Mesmo Assim** (no macOS 13/14: botão direito no app → Abrir)
 4. Pronto: ele se instala sozinho, aparece na barra de menus e já mostra quanto espaço escondido encontrou
@@ -34,14 +34,14 @@ Em uma tarde voltaram **mais de 35 GB** sem apagar nada importante. Esta ferrame
 
 Abra o Claude Code, o Codex ou o Cursor e cole:
 
-> Instale o disco-livre pra mim: https://github.com/Willclaf/disco-livre — siga o AGENTS.md do repositório.
+> Instale o disco-livre pra mim: https://github.com/innovationhenrick/disco-livre — siga o AGENTS.md do repositório.
 
 A IA baixa o projeto, pergunta a sua meta de espaço, instala tudo e confere se funcionou. Você só aprova o que ela pedir.
 
 ### Jeito manual: uma linha no Terminal
 
 ```bash
-zsh -c "$(curl -fsSL https://raw.githubusercontent.com/Willclaf/disco-livre/main/instalar.sh)"
+zsh -c "$(curl -fsSL https://raw.githubusercontent.com/innovationhenrick/disco-livre/main/instalar.sh)"
 ```
 
 Não precisa de git nem de nenhuma ferramenta da Apple: o app vem pronto (e é conferido por SHA-256 antes de instalar). O instalador pergunta a sua meta de espaço livre e, no fim, **o Disco Livre abre a análise geral do seu Mac**.
@@ -130,14 +130,33 @@ disco-livre config                     # ver tudo
 disco-livre config meta 30             # espaço livre mínimo (GB)
 disco-livre config auto-limpeza sim    # limpar sozinho quando passar da meta
 disco-livre config intervalo 3         # vigiar a cada 3 horas
+disco-livre config alerta-contexto 1   # avisar se contexto/harness crescer 1 GB/24h
 disco-livre ativar / desativar         # liga/desliga a vigilância
 ```
+
+### Contexto e harness local
+
+O fork também acompanha o espaço ocupado pelo contexto persistido e pelo
+harness local de agentes. Por padrão observa `~/.codex`, `~/.claude` e
+`~/.agents`. Para incluir um workspace ou outro diretório:
+
+```bash
+disco-livre contexto
+disco-livre contexto adicionar "$PWD" "Workspace atual"
+disco-livre dados contexto       # JSON para automações e agentes
+disco-livre contexto remover "Workspace atual"
+```
+
+Esses alvos são somente observados: sessões, prompts, logs, projetos e
+arquivos do harness nunca entram na limpeza automática. Pastas aninhadas são
+mostradas, mas não são somadas duas vezes.
 
 ### A vigilância avisa quando
 
 - o espaço livre fica **abaixo da sua meta**
 - o disco perde **mais de 10 GB em 24 h** (algo novo está enchendo)
 - um app entra em **loop de crash** (os relatórios são apagados sozinhos)
+- o contexto/harness cresce mais de **1 GB em 24 h** (somente alerta)
 
 Tudo o que ele apaga fica anotado em `~/Library/Logs/disco-livre.log`.
 
@@ -202,7 +221,7 @@ Clique no ícone da barra de cima › **Ajustes** › **Desinstalar o Disco Livr
 Abra o app **Terminal**, cole esta linha e aperte Enter:
 
 ```bash
-zsh -c "$(curl -fsSL https://raw.githubusercontent.com/Willclaf/disco-livre/main/uninstall.sh)"
+zsh -c "$(curl -fsSL https://raw.githubusercontent.com/innovationhenrick/disco-livre/main/uninstall.sh)"
 ```
 
 Ela remove o app, a vigilância, o comando `disco-livre`, as configurações e as permissões que o macOS tinha guardado. Não desfaz nada que ele já limpou.

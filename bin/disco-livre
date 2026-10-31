@@ -6,11 +6,15 @@ emulate -R zsh
 setopt NULL_GLOB
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$PATH"
 
-VERSAO="1.4.1"
+VERSAO="1.5.0"
 SCRIPT="${0:A}"
 DIR_CONF="${DISCO_LIVRE_DIR:-$HOME/.config/disco-livre}"
 CONF="$DIR_CONF/config"
 HIST="$DIR_CONF/historico.csv"
+CONTEXTO_HIST="$DIR_CONF/contexto.csv"
+CONTEXTOS="$DIR_CONF/contextos"
+CONTEXTO_CACHE="$DIR_CONF/contexto-atual"
+CONTEXTO_BASE="$DIR_CONF/contexto-base"
 ESTADO="$DIR_CONF/estado"
 LOG="$HOME/Library/Logs/disco-livre.log"
 LABEL="com.disco-livre.vigia"
@@ -24,6 +28,7 @@ INTERVALO_HORAS=3     # de quanto em quanto tempo a vigilância roda
 LOG_DIAS=7            # logs mais velhos que isso são lixo
 ALERTA_QUEDA_GB=10    # avisa se o espaço livre cair isso em 24h
 LIMITE_CRASH=500      # quantos relatórios de crash contam como surto
+CONTEXTO_ALERTA_GB=1  # avisa se contexto/harness crescer isso em 24h
 [[ -f $CONF ]] && source "$CONF"
 
 if [[ -t 1 ]]; then
@@ -42,7 +47,10 @@ limitado() {
   local seg=$1; shift
   "$@" &
   local job=$!
-  ( sleep $seg; kill $job 2>/dev/null ) &
+  # O guarda não pode herdar o pipe da substituição de comando: se herdar,
+  # quem chamou `$(limitado ...)` fica esperando até o timeout mesmo quando
+  # o comando principal já terminou.
+  ( sleep $seg; kill $job 2>/dev/null ) >/dev/null 2>&1 &
   local guarda=$!
   wait $job 2>/dev/null
   local rc=$?
@@ -74,6 +82,115 @@ pode_avisar() {
   (( agora - ${ult:-0} < $2 )) && return 1
   mkdir -p "$DIR_CONF"
   { grep -v "^$1=" "$ESTADO" 2>/dev/null; print "$1=$agora"; } > "$ESTADO.tmp" && mv "$ESTADO.tmp" "$ESTADO"
+}
+
+# ─── contexto e harness local ─────────────────────────────────────────────
+# Estes diretórios são observados, mas nunca entram na limpeza automática.
+# O arquivo usa: nome|caminho. Assim o usuário pode adicionar workspaces sem
+# colocar caminhos específicos desta máquina no código distribuído.
+contextos_padrao() {
+  print -r -- "Codex global|$HOME/.codex"
+  print -r -- "Claude Code global|$HOME/.claude"
+  print -r -- "Harness de agentes|$HOME/.agents"
+}
+
+garantir_contextos() {
+  [[ -f $CONTEXTOS ]] && return 0
+  mkdir -p "$DIR_CONF"
+  : > "$CONTEXTOS"
+  local nome cam
+  while IFS='|' read -r nome cam; do
+    [[ -d $cam ]] && print -r -- "$nome|$cam" >> "$CONTEXTOS"
+  done < <(contextos_padrao)
+}
+
+contextos_linhas() {
+  garantir_contextos
+  cat "$CONTEXTOS"
+}
+
+# Evita contar duas vezes um alvo que esteja dentro de outro (por exemplo,
+# ~/.claude dentro de um workspace monitorado).
+contexto_incluido() {
+  local alvo=$1 nome outro mesmo=0
+  while IFS='|' read -r nome outro; do
+    [[ -z $outro ]] && continue
+    if [[ "$alvo" == "$outro" ]]; then
+      (( mesmo )) && return 1
+      mesmo=1
+    elif [[ "$alvo" == "$outro"/* ]]; then
+      return 1
+    fi
+  done < <(contextos_linhas)
+  return 0
+}
+
+contexto_total_kb() {
+  local nome cam t total=0
+  while IFS='|' read -r nome cam; do
+    [[ -d $cam ]] || continue
+    contexto_incluido "$cam" || continue
+    t=$(limitado 60 kb "$cam")
+    (( total += t ))
+  done < <(contextos_linhas)
+  print -r -- "$total"
+}
+
+# Mede uma vez e guarda também o tamanho de cada alvo para o app. O arquivo
+# usa: nome|kb|caminho. A próxima leitura do resumo não precisa varrer tudo.
+medir_contextos_cache() {
+  mkdir -p "$DIR_CONF"
+  local tmp="$CONTEXTO_CACHE.tmp.$$.$RANDOM" nome cam t anterior total=0
+  : > "$tmp"
+  while IFS='|' read -r nome cam; do
+    [[ -d $cam ]] || continue
+    t=$(limitado 60 kb "$cam"); t=${t:-0}
+    # Google Drive/File Provider pode responder 0 durante uma janela de
+    # sincronização. Se ainda há entradas e a última amostra era maior,
+    # preserve-a em vez de criar um falso alerta de queda.
+    anterior=$(awk -F'|' -v p="$cam" '$3==p {print $2; exit}' "$CONTEXTO_CACHE" 2>/dev/null)
+    if [[ $t == 0 && $anterior == <-> && $anterior -gt 0 ]] &&
+       [[ -n $(find "$cam" -mindepth 1 -print -quit 2>/dev/null) ]]; then
+      t=$anterior
+    fi
+    print -r -- "$nome|$t|$cam" >> "$tmp"
+    contexto_incluido "$cam" && (( total += t ))
+  done < <(contextos_linhas)
+  mv "$tmp" "$CONTEXTO_CACHE"
+  print -r -- "$total"
+}
+
+contexto_tendencia_kb() {
+  [[ -f $CONTEXTO_HIST ]] || return 0
+  local ref agora inicio base atual
+  agora=$(date +%s)
+  inicio=$(( agora - 86400 ))
+  atual=${1:-$(contexto_total_kb)}
+  base=$(cat "$CONTEXTO_BASE" 2>/dev/null)
+  [[ $base == <-> && $base -gt $inicio ]] && inicio=$base
+  ref=$(awk -F, -v t=$inicio '$1>=t {print $2; exit}' "$CONTEXTO_HIST")
+  [[ -n $ref ]] && print $(( atual - ref ))
+}
+
+marcar_contexto_base() {
+  mkdir -p "$DIR_CONF"
+  print -r -- "$(date +%s)" > "$CONTEXTO_BASE"
+}
+
+# O app consulta o resumo com frequência. Use a última amostra do watcher e
+# deixe `disco-livre contexto` para uma medição sob demanda, ao vivo.
+contexto_cache_kb() {
+  local nome valor cam total=0
+  if [[ -f $CONTEXTO_CACHE ]]; then
+    while IFS='|' read -r nome valor cam; do
+      [[ $valor == <-> ]] || continue
+      contexto_incluido "$cam" && (( total += valor ))
+    done < "$CONTEXTO_CACHE"
+    print -r -- "$total"
+    return 0
+  fi
+  valor=$(tail -n 1 "$CONTEXTO_HIST" 2>/dev/null | cut -d, -f2)
+  [[ $valor == <-> ]] && print -r -- "$valor" || contexto_total_kb
 }
 
 barra() {
@@ -202,10 +319,15 @@ quem_usa() {
   case $cond in
     -|"") return 0 ;;
     \?)
+      [[ -n $DISCO_LIVRE_RAPIDO ]] && return 0
       local -a dirs
+      local segundos=5
       if [[ $tipo == electron ]]; then dirs=(${(f)"$(electron_dirs "$cam")"}); else dirs=("$cam"); fi
       for d in $dirs; do
-        nome=$(lsof +D "$d" -Fc 2>/dev/null | sed -n 's/^c//p' | head -1)
+        # +D pode atravessar centenas de milhares de arquivos de um cache.
+        # Se o macOS demorar, preferimos marcar como desconhecido e manter o
+        # painel responsivo; nunca vale travar a vigilância por isso.
+        nome=$(limitado $segundos lsof +D "$d" -Fc 2>/dev/null | sed -n 's/^c//p' | head -1)
         if [[ -n $nome ]]; then
           nome=${nome//\\x20/ }
           nome=${${${nome% Helper*}% \(*}%.app}
@@ -286,7 +408,7 @@ dica() {
 # ─── comandos ──────────────────────────────────────────────────────────────
 
 cmd_status() {
-  local livre=$(livre_kb) total=$(total_kb) meta=$(( $(gb_kb $META_GB) ))
+  local livre=$(livre_kb) total=$(total_kb) meta=$(( $(gb_kb $META_GB) )) contexto=$(contexto_cache_kb)
   print -r -- "${B}disco-livre${N} ${D}$VERSAO${N}"
   print -r -- ""
   printf "  Espaço livre: %s%s%s de %s\n" "$B" "$(humano $livre)" "$N" "$(humano $total)"
@@ -303,6 +425,7 @@ cmd_status() {
     print -r -- "  Vigilância automática: ${Y}desligada${N} → disco-livre ativar"
   fi
   print -r -- "  Limpeza automática abaixo da meta: $AUTO_LIMPEZA  ${D}(disco-livre config auto-limpeza sim|nao)${N}"
+  print -r -- "  Contexto/harness observado: $(humano $contexto)  ${D}(disco-livre contexto)${N}"
   print -r -- ""
   print -r -- "  ${D}disco-livre ajuda — lista todos os comandos${N}"
 }
@@ -363,7 +486,14 @@ listar_lixo() {
   local tipo desc cam cond t quem
   while IFS='|' read -r tipo desc cam cond; do
     [[ -d $cam ]] || continue
-    t=$(medir $tipo "$cam")
+    if [[ -n $DISCO_LIVRE_RAPIDO ]]; then
+      # O painel só precisa de uma fotografia aproximada. A limpeza manual
+      # chama listar_lixo sem este modo e mede tudo com calma antes de apagar.
+      t=$(limitado 0.25 medir "$tipo" "$cam")
+    else
+      t=$(medir $tipo "$cam")
+    fi
+    t=${t:-0}
     (( t < 1024 )) && continue
     quem=$(quem_usa "$tipo" "$cam" "$cond")
     print -r -- "$t|$desc|${${quem:+1}:-0}|$tipo|$cam|$quem"
@@ -493,6 +623,76 @@ controle_remoto() {
   (( achou )) || print -r -- "  ${G}Nenhum navegador sendo controlado.${N}"
 }
 
+cmd_contexto() {
+  garantir_contextos
+  local acao=${1:-listar} nome cam t total=0 tendencia marca encontrou=0
+  case $acao in
+    listar|status)
+      titulo "Contexto e harness local"
+      while IFS='|' read -r nome cam; do
+        [[ -d $cam ]] || {
+          print -r -- "  ${Y}—${N} $nome ${D}(não encontrado: $(curto "$cam"))${N}"
+          continue
+        }
+        t=$(limitado 60 kb "$cam")
+        marca=""
+        if contexto_incluido "$cam"; then
+          (( total += t ))
+        else
+          marca=" ${D}(já incluído em outro alvo)${N}"
+        fi
+        encontrou=1
+        printf "  %s%-9s%s %-26s %s%s\n" "$B" "$(humano $t)" "$N" "$nome" "$(curto "$cam")" "$marca"
+      done < <(contextos_linhas)
+      (( encontrou )) || print -r -- "  ${Y}Nenhum alvo de contexto foi cadastrado.${N}"
+      print -r -- "  ${B}Total observado: $(humano $total)${N}"
+      tendencia=$(contexto_tendencia_kb "$total")
+      if [[ -n $tendencia && $tendencia -gt 0 ]]; then
+        print -r -- "  ${Y}Últimas 24h: cresceu $(humano $tendencia)${N}"
+      elif [[ -n $tendencia && $tendencia -lt 0 ]]; then
+        print -r -- "  ${G}Últimas 24h: reduziu $(humano $tendencia)${N}"
+      fi
+      print -r -- ""
+      print -r -- "  ${D}Adicionar: disco-livre contexto adicionar <pasta> [nome]${N}"
+      print -r -- "  ${D}Remover:   disco-livre contexto remover <nome|pasta>${N}"
+      ;;
+    adicionar|add)
+      [[ -n $2 ]] || erro "use: disco-livre contexto adicionar <pasta> [nome]"
+      [[ $2 != *'|'* ]] || erro "o caminho não pode conter o caractere |"
+      [[ -d $2 ]] || erro "pasta não encontrada: $2"
+      cam=${2:A}
+      nome=${3:-${cam:t}}
+      [[ $nome != *'|'* ]] || erro "o nome não pode conter o caractere |"
+      while IFS='|' read -r nome cam; do
+        [[ ${cam:A} == ${2:A} ]] && erro "essa pasta já está sendo observada"
+      done < <(contextos_linhas)
+      nome=${3:-${2:t}}
+      print -r -- "$nome|${2:A}" >> "$CONTEXTOS"
+      marcar_contexto_base
+      print -r -- "${G}✓${N} Observando $nome: $(curto "${2:A}")"
+      ;;
+    remover|remove)
+      [[ -n $2 ]] || erro "use: disco-livre contexto remover <nome|pasta>"
+      local alvo=$2 tmp="$CONTEXTOS.tmp" removido=0
+      : > "$tmp"
+      while IFS='|' read -r nome cam; do
+        if [[ $nome == "$alvo" || $cam == "$alvo" || ${cam:A} == ${alvo:A} ]]; then
+          removido=1
+        else
+          print -r -- "$nome|$cam" >> "$tmp"
+        fi
+      done < <(contextos_linhas)
+      (( removido )) || { rm -f "$tmp"; erro "não achei esse alvo em contexto"; }
+      mv "$tmp" "$CONTEXTOS"
+      marcar_contexto_base
+      print -r -- "${G}✓${N} Alvo removido da vigilância: $alvo"
+      ;;
+    *)
+      erro "use: disco-livre contexto [listar|adicionar|remover]"
+      ;;
+  esac
+}
+
 surtos_crash() {
   local achou=0 n t app c
   while IFS='|' read -r n t app c; do
@@ -535,17 +735,20 @@ cmd_analisar() {
   titulo "3. Maiores pastas pra revisar ${D}(medindo… pode levar um minuto)${N}"
   maiores 15
 
-  titulo "4. Tarefas em segundo plano"
+  titulo "4. Contexto e harness local"
+  cmd_contexto listar
+
+  titulo "5. Tarefas em segundo plano"
   tarefas
 
-  titulo "5. Navegadores com controle remoto"
+  titulo "6. Navegadores com controle remoto"
   controle_remoto
 
   local lixeira snaps
   lixeira=$(kb "$HOME/.Trash")
   snaps=$(tmutil listlocalsnapshots / 2>/dev/null | grep -c 'com.apple')
   if (( lixeira > 102400 || snaps > 0 )); then
-    titulo "6. Outros"
+    titulo "7. Outros"
     (( lixeira > 102400 )) && print -r -- "  Lixeira com ${B}$(humano $lixeira)${N} — esvazie pelo Finder"
     (( snaps > 0 )) && print -r -- "  $snaps snapshot(s) local(is) do Time Machine ${D}(o macOS apaga sozinho quando precisar de espaço)${N}"
   fi
@@ -559,12 +762,25 @@ registrar() {
   if (( $(wc -l < "$HIST") > 1000 )); then
     tail -n 500 "$HIST" > "$HIST.tmp" && mv "$HIST.tmp" "$HIST"
   fi
+  local contexto=$(medir_contextos_cache)
+  print -r -- "$(date +%s),$contexto" >> "$CONTEXTO_HIST"
+  if (( $(wc -l < "$CONTEXTO_HIST") > 1000 )); then
+    tail -n 500 "$CONTEXTO_HIST" > "$CONTEXTO_HIST.tmp" && mv "$CONTEXTO_HIST.tmp" "$CONTEXTO_HIST"
+  fi
 }
 
 cmd_vigiar() {
   if app_sumiu; then registrar; log "o app foi removido: desinstalando o vigia"; cmd_desinstalar >/dev/null; return 0; fi
   registrar
   local livre=$(livre_kb) meta=$(( $(gb_kb $META_GB) )) c n tam s
+
+  # 0) crescimento do contexto/harness — apenas alerta; nunca limpa esses dados.
+  local contexto=$(contexto_cache_kb) contexto_crescimento=$(contexto_tendencia_kb "$contexto")
+  contexto_crescimento=${contexto_crescimento:-0}
+  if (( contexto_crescimento > $(gb_kb $CONTEXTO_ALERTA_GB) )) && pode_avisar contexto 43200; then
+    log "contexto/harness cresceu: +$(humano $contexto_crescimento) em 24h"
+    avisar "Contexto e harness crescendo" "Aumentaram $(humano $contexto_crescimento) em 24h. Rode: disco-livre contexto"
+  fi
 
   # 1) surto de crash — o problema que enche o disco em poucos dias
   for c in ${(f)"$(crashpads)"}; do
@@ -622,6 +838,7 @@ INTERVALO_HORAS=$INTERVALO_HORAS
 LOG_DIAS=$LOG_DIAS
 ALERTA_QUEDA_GB=$ALERTA_QUEDA_GB
 LIMITE_CRASH=$LIMITE_CRASH
+CONTEXTO_ALERTA_GB=$CONTEXTO_ALERTA_GB
 EOF
 }
 
@@ -634,6 +851,7 @@ cmd_config() {
     print -r -- "  intervalo      ${INTERVALO_HORAS}h        de quanto em quanto tempo vigiar"
     print -r -- "  logs-dias      $LOG_DIAS          idade pra log virar lixo"
     print -r -- "  alerta-queda   $ALERTA_QUEDA_GB GB      avisar se perder isso em 24h"
+    print -r -- "  alerta-contexto $CONTEXTO_ALERTA_GB GB      avisar se contexto/harness crescer em 24h"
     print -r -- ""
     print -r -- "  ${D}Ex.: disco-livre config meta 30${N}"
     return 0
@@ -646,6 +864,7 @@ cmd_config() {
     intervalo)    [[ $valor == <1-24> ]] || erro "use um número de horas (1 a 24)"; INTERVALO_HORAS=$valor ;;
     logs-dias)    [[ $valor == <1-> ]] || erro "use um número de dias"; LOG_DIAS=$valor ;;
     alerta-queda) [[ $valor == <1-> ]] || erro "use um número em GB"; ALERTA_QUEDA_GB=$valor ;;
+    alerta-contexto) [[ $valor == <1-> ]] || erro "use um número em GB"; CONTEXTO_ALERTA_GB=$valor ;;
     *) erro "opção desconhecida: $chave (veja: disco-livre config)" ;;
   esac
   salvar_config
@@ -665,6 +884,7 @@ cmd_ativar() {
   <key>ProgramArguments</key><array><string>$SCRIPT</string><string>vigiar</string></array>
   <key>StartInterval</key><integer>$(( INTERVALO_HORAS * 3600 ))</integer>
   <key>RunAtLoad</key><true/>
+  <key>ExitTimeOut</key><integer>120</integer>
   <key>ProcessType</key><string>Background</string>
   <key>LowPriorityIO</key><true/>
   <key>Nice</key><integer>10</integer>
@@ -1001,7 +1221,7 @@ cmd_apoiar() {
   print -r -- ""
   print -r -- "  ${G}✓${N} Pix Copia e Cola ${B}já está copiado${N}: é só colar no app do banco."
   print -r -- "  Chave Pix: ${B}$PIX_CHAVE${N}  ${D}(Willian Claf)${N}"
-  print -r -- "  QR Code: no app (☕ no rodapé) ou em github.com/Willclaf/disco-livre#apoie"
+  print -r -- "  QR Code: no app (☕ no rodapé) ou em github.com/innovationhenrick/disco-livre#apoie"
   print -r -- ""
   print -r -- "  Valeu demais! 💚"
 }
@@ -1009,7 +1229,7 @@ cmd_apoiar() {
 # ─── atualização ──────────────────────────────────────────────────────────
 
 ultima_versao() {
-  curl -fsL --max-time 6 "https://api.github.com/repos/Willclaf/disco-livre/releases/latest" 2>/dev/null |
+  curl -fsL --max-time 6 "https://api.github.com/repos/innovationhenrick/disco-livre/releases/latest" 2>/dev/null |
     sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1
 }
 
@@ -1031,7 +1251,7 @@ cmd_atualizar() {
     return 0
   fi
   print -r -- "Atualizando o Disco Livre $VERSAO → $nova… ${D}(suas configurações ficam como estão)${N}"
-  zsh -c "$(curl -fsSL https://raw.githubusercontent.com/Willclaf/disco-livre/main/instalar.sh)" -- --sim --nao-abrir || erro "a atualização falhou"
+  zsh -c "$(curl -fsSL https://raw.githubusercontent.com/innovationhenrick/disco-livre/main/instalar.sh)" -- --sim --nao-abrir || erro "a atualização falhou"
   log "atualizou: $VERSAO → $nova"
   [[ -d "/Applications/Disco Livre.app" || -d "$HOME/Applications/Disco Livre.app" ]] && open -a "Disco Livre"
   return 0
@@ -1042,16 +1262,39 @@ cmd_atualizar() {
 js()   { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\t'/ }; print -rn -- "\"$s\""; }
 bool() { (( $1 )) && print -rn true || print -rn false; }
 
+contextos_json() {
+  local sep= nome cam t contado
+  print -rn -- "["
+  while IFS='|' read -r nome cam; do
+    [[ -d $cam ]] || continue
+    if [[ -n $DISCO_LIVRE_RAPIDO && -f $CONTEXTO_CACHE ]]; then
+      t=$(awk -F'|' -v p="$cam" '$3==p {print $2; exit}' "$CONTEXTO_CACHE")
+    else
+      t=$(limitado 60 kb "$cam")
+    fi
+    t=${t:-0}
+    contexto_incluido "$cam" && contado=1 || contado=0
+    print -rn -- "$sep{\"nome\":$(js "$nome"),\"kb\":$t,\"cam\":$(js "$cam"),\"contado\":$(bool $contado)}"
+    sep=,
+  done < <(contextos_linhas)
+  print -rn -- "]"
+}
+
 cmd_dados() {
   local sep t desc b tipo cam n app c label info prog porta perfil p
   case ${1:-resumo} in
     resumo)
-      local tend=$(tendencia_kb) at=0 al=0
+      # O resumo é consultado pelo ícone a cada 10 min. Não bloqueie a UI
+      # esperando o lsof recursivo de caches; a limpeza faz uma checagem
+      # completa novamente antes de apagar.
+      local DISCO_LIVRE_RAPIDO=1
+      local tend=$(tendencia_kb) at=0 al=0 contexto=$(contexto_cache_kb) contexto_tend=$(contexto_tendencia_kb "$contexto")
       ativo && at=1
       [[ $AUTO_LIMPEZA == sim ]] && al=1
       print -rn -- "{\"versao\":\"$VERSAO\",\"livre\":$(livre_kb),\"total\":$(total_kb),\"meta_kb\":$(gb_kb $META_GB),\"meta_gb\":$META_GB"
       print -rn -- ",\"vigilancia\":$(bool $at),\"auto_limpeza\":$(bool $al),\"intervalo\":$INTERVALO_HORAS"
       print -rn -- ",\"tendencia_kb\":${tend:-null},\"primeira_feita\":$(primeira_feita && print -n true || print -n false)"
+      print -rn -- ",\"contexto_kb\":$contexto,\"contexto_alerta_gb\":$CONTEXTO_ALERTA_GB,\"contexto_tendencia_kb\":${contexto_tend:-null},\"contextos\":$(contextos_json)"
 
       print -rn -- ",\"lixo\":["; sep=
       while IFS='|' read -r t desc b tipo cam; do
@@ -1091,7 +1334,12 @@ cmd_dados() {
       done < <(linhas_geral --nova)
       print -r -- "]}"
       ;;
-    *) erro "use: disco-livre dados resumo|pastas|geral" ;;
+    contexto)
+      local total=$(contexto_total_kb) tendencia=$(contexto_tendencia_kb "$total")
+      print -rn -- "{\"total_kb\":$total,\"alerta_gb\":$CONTEXTO_ALERTA_GB,\"tendencia_kb\":${tendencia:-null},\"itens\":$(contextos_json)}"
+      print -r -- ""
+      ;;
+    *) erro "use: disco-livre dados resumo|pastas|geral|contexto" ;;
   esac
 }
 
@@ -1103,6 +1351,11 @@ ${B}Uso:${N}
   disco-livre                      resumo: espaço livre, meta e vigilância
   disco-livre geral                análise geral: acha o espaço escondido e você escolhe o que limpar
   disco-livre analisar             raio-x completo: o que ocupa espaço e por quê
+  disco-livre contexto             mede o contexto e o harness local observados
+  disco-livre contexto adicionar <pasta> [nome]
+                                  adiciona um workspace ou diretório de agentes
+  disco-livre contexto remover <nome|pasta>
+                                  para de observar um alvo (não apaga nada)
   disco-livre limpar               mostra o lixo seguro (simulação)
   disco-livre limpar --executar    apaga o lixo seguro (pede confirmação)
   disco-livre esvaziar-lixeira     esvazia a Lixeira (pede confirmação)
@@ -1123,6 +1376,7 @@ ${B}Uso:${N}
 ${B}O que a vigilância faz${N} (a cada ${INTERVALO_HORAS}h):
   • avisa quando o espaço livre fica abaixo da meta
   • avisa quando o disco perde mais de ${ALERTA_QUEDA_GB} GB em 24h
+  • avisa quando o contexto/harness cresce mais de ${CONTEXTO_ALERTA_GB} GB em 24h
   • detecta apps crashando em loop e apaga os relatórios
   • se auto-limpeza = sim, limpa o lixo seguro sozinho
 
@@ -1142,6 +1396,7 @@ case ${1:-status} in
   apoiar|cafe)     cmd_apoiar ;;
   atualizar)       cmd_atualizar "$2" ;;
   config)          shift; cmd_config "$@" ;;
+  contexto)        shift; cmd_contexto "$@" ;;
   ativar)          cmd_ativar ;;
   desativar)       cmd_desativar ;;
   desinstalar)     cmd_desinstalar ;;

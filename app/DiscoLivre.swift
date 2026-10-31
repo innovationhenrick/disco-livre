@@ -39,7 +39,7 @@ enum CLI {
 enum Instalador {
     static let casa = CLI.casa
 
-    /// "VERSAO=\"1.3.0\"" → "1.3.0"
+    /// "VERSAO=\"1.5.0\"" → "1.5.0"
     static func versao(_ caminho: String) -> String? {
         guard let txt = try? String(contentsOfFile: caminho, encoding: .utf8) else { return nil }
         for linha in txt.split(separator: "\n").prefix(30) where linha.hasPrefix("VERSAO=") {
@@ -135,6 +135,12 @@ struct Resumo: Decodable {
     var crashes: [Crash]
     var tarefas: [Tarefa]
     var remoto: [Remoto]
+    // Opcional para continuar funcionando se a ferramenta instalada ainda
+    // for anterior ao monitor de contexto/harness.
+    var contextoKb: Int64?
+    var contextoAlertaGb: Int?
+    var contextoTendenciaKb: Int64?
+    var contextos: [Contexto]?
 }
 
 struct Lixo: Decodable, Identifiable {
@@ -155,6 +161,12 @@ struct Tarefa: Decodable, Identifiable {
 struct Remoto: Decodable, Identifiable {
     var app: String; var porta: String; var perfil: String
     var id: String { app + porta }
+}
+
+struct Contexto: Decodable, Identifiable {
+    var nome: String; var kb: Int64; var cam: String; var contado: Bool
+    var id: String { cam }
+    var curto: String { cam.replacingOccurrences(of: NSHomeDirectory(), with: "~") }
 }
 
 struct ItemGeral: Decodable, Identifiable {
@@ -237,7 +249,7 @@ final class Estado: ObservableObject {
     }
 
     func checarAtualizacao() async {
-        guard let url = URL(string: "https://api.github.com/repos/Willclaf/disco-livre/releases/latest"),
+        guard let url = URL(string: "https://api.github.com/repos/innovationhenrick/disco-livre/releases/latest"),
               let (dados, _) = try? await URLSession.shared.data(from: url),
               let json = try? JSONSerialization.jsonObject(with: dados) as? [String: Any],
               let tag = json["tag_name"] as? String else { return }
@@ -571,6 +583,7 @@ struct PainelView: View {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 16) {
                             alertas(r)
+                            contextoDetalhado(r)
                             lixoDetalhado(r)
                             pastas
                             ajustes(r)
@@ -650,7 +663,16 @@ struct PainelView: View {
                         .toggleStyle(.switch).controlSize(.mini).labelsHidden()
                 }
                 Divider().padding(.leading, 42)
-                // 4. pra limpar
+                // 4. contexto e harness
+                Linha(icone: "rectangle.stack.fill", cor: .indigo, titulo: "Contexto") {
+                    let kb = r.contextoKb ?? 0
+                    Text(tamanho(kb)).monospacedDigit().foregroundStyle(.secondary)
+                    if let t = r.contextoTendenciaKb, t > 0 {
+                        Text("↑ \(tamanho(t))").font(.caption2).foregroundStyle(.orange)
+                    }
+                }
+                Divider().padding(.leading, 42)
+                // 5. pra limpar
                 Linha(icone: "sparkles", cor: .green, titulo: "Pra limpar") {
                     if e.limpando {
                         ProgressView().controlSize(.mini)
@@ -786,6 +808,38 @@ struct PainelView: View {
                 .font(.caption)
                 .opacity(i.bloqueado ? 0.55 : 1)
             }
+        }
+    }
+
+    func contextoDetalhado(_ r: Resumo) -> some View {
+        let lista = r.contextos ?? []
+        return Secao(titulo: "Contexto e harness — somente observado") {
+            if lista.isEmpty {
+                Text("Nenhum diretório cadastrado.").font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(lista) { item in
+                HStack(spacing: 4) {
+                    Image(systemName: item.contado ? "eye.fill" : "arrow.down.right.and.arrow.up.left")
+                        .foregroundStyle(item.contado ? .indigo : .secondary)
+                        .font(.caption2)
+                    Text(item.nome).lineLimit(1).truncationMode(.middle)
+                    Spacer()
+                    Text(tamanho(item.kb)).monospacedDigit().foregroundStyle(.secondary)
+                    Button { NSWorkspace.shared.open(URL(fileURLWithPath: item.cam)) } label: {
+                        Image(systemName: "arrow.up.forward.square")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(item.curto)
+                }
+                .font(.caption)
+                if !item.contado {
+                    Text("já incluído em outro alvo").font(.caption2).foregroundStyle(.secondary)
+                        .padding(.leading, 18)
+                }
+            }
+            Text("O Disco Livre não apaga sessões, prompts, logs ou arquivos do harness automaticamente.")
+                .font(.caption2).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
