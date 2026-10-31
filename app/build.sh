@@ -1,8 +1,13 @@
 #!/bin/zsh
-# Compila o "Disco Livre.app" (precisa só das Ferramentas de Linha de Comando: xcode-select --install)
+# Compila o "Disco Livre.app" usando o SDK ativo do macOS.
 set -e
 cd "${0:A:h}"
 VERSAO=$(sed -n 's/^VERSAO="\(.*\)"/\1/p' ../bin/disco-livre)
+
+SDK=$(xcrun --sdk macosx --show-sdk-path)
+SWIFTC=$(xcrun --sdk macosx --find swiftc)
+LIPO=$(xcrun --sdk macosx --find lipo)
+ICONUTIL=${ICONUTIL:-$(command -v iconutil)}
 
 APP="build/Disco Livre.app"
 TMP="build/tmp"
@@ -10,14 +15,14 @@ rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$TMP/AppIcon.iconset"
 
 for arch in arm64 x86_64; do
-  swiftc -O -swift-version 5 -parse-as-library -target $arch-apple-macos13.0 \
+  "$SWIFTC" -sdk "$SDK" -O -swift-version 5 -parse-as-library -target $arch-apple-macos13.0 \
     DiscoLivre.swift -o "$TMP/DiscoLivre-$arch"
 done
-lipo -create "$TMP"/DiscoLivre-* -output "$APP/Contents/MacOS/DiscoLivre"
+"$LIPO" -create "$TMP"/DiscoLivre-* -output "$APP/Contents/MacOS/DiscoLivre"
 
-swiftc -O -swift-version 5 icone.swift -o "$TMP/icone"
+"$SWIFTC" -sdk "$SDK" -O -swift-version 5 icone.swift -o "$TMP/icone"
 "$TMP/icone" "$TMP/AppIcon.iconset"
-iconutil -c icns "$TMP/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
+"$ICONUTIL" -c icns "$TMP/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"
 
 # a ferramenta e a skill vão dentro do app (autoinstalação pra quem baixa o .dmg)
 cp ../bin/disco-livre "$APP/Contents/Resources/disco-livre"
